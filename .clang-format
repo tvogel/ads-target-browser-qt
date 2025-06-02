@@ -1,0 +1,4 @@
+BreakBeforeBraces: Allman
+PointerAlignment: Middle
+IndentCaseLabels: true
+ColumnLimit: 0

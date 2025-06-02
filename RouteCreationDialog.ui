@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>RouteCreationDialog</class>
+ <widget class="QDialog" name="RouteCreationDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>370</width>
+    <height>314</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Create ADS Route</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <layout class="QFormLayout" name="formLayout">
+     <property name="fieldGrowthPolicy">
+      <enum>QFormLayout::FieldGrowthPolicy::ExpandingFieldsGrow</enum>
+     </property>
+     <item row="0" column="0">
+      <widget class="QLabel" name="labelSendingNetId">
+       <property name="text">
+        <string>Local Net ID</string>
+       </property>
+       <property name="buddy">
+        <cstring>editSendingNetId</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QLineEdit" name="editSendingNetId"/>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="labelAddingHostName">
+       <property name="text">
+        <string>Local IP</string>
+       </property>
+       <property name="buddy">
+        <cstring>editAddingHostName</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QLineEdit" name="editAddingHostName"/>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="labelIpAddress">
+       <property name="text">
+        <string>PLC IP Address</string>
+       </property>
+       <property name="buddy">
+        <cstring>editIpAddress</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QLineEdit" name="editIpAddress"/>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="labelUsername">
+       <property name="text">
+        <string>Username</string>
+       </property>
+       <property name="buddy">
+        <cstring>editUsername</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QLineEdit" name="editUsername"/>
+     </item>
+     <item row="4" column="0">
+      <widget class="QLabel" name="labelPassword">
+       <property name="text">
+        <string>Password</string>
+       </property>
+       <property name="buddy">
+        <cstring>editPassword</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="1">
+      <widget class="QLineEdit" name="editPassword">
+       <property name="echoMode">
+        <enum>QLineEdit::EchoMode::Password</enum>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="0">
+      <widget class="QLabel" name="labelRouteName">
+       <property name="text">
+        <string>Route Name (optional)</string>
+       </property>
+       <property name="buddy">
+        <cstring>editRouteName</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <widget class="QLineEdit" name="editRouteName">
+       <property name="placeholderText">
+        <string>Defaults to local IP</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="0">
+      <widget class="QLabel" name="labelAddedNetId">
+       <property name="text">
+        <string>Added Net ID (optional)</string>
+       </property>
+       <property name="buddy">
+        <cstring>editAddedNetId</cstring>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="1">
+      <widget class="QLineEdit" name="editAddedNetId">
+       <property name="placeholderText">
+        <string>Defaults to local Net ID</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QDialogButtonBox" name="buttonBox">
+     <property name="standardButtons">
+      <set>QDialogButtonBox::StandardButton::Cancel|QDialogButtonBox::StandardButton::Ok</set>
+     </property>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections>
+  <connection>
+   <sender>buttonBox</sender>
+   <signal>accepted()</signal>
+   <receiver>RouteCreationDialog</receiver>
+   <slot>accept()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>130</x>
+     <y>293</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>368</x>
+     <y>214</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>buttonBox</sender>
+   <signal>rejected()</signal>
+   <receiver>RouteCreationDialog</receiver>
+   <slot>reject()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>162</x>
+     <y>290</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>370</x>
+     <y>251</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+</ui>
