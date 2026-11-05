@@ -76,7 +76,7 @@ static QStringList expandArrayIndices(const AdsDatatypeEntry * adsType)
   {
     auto arrayInfo = adsType->arrayInfo()[iArrayDim];
     auto newArrayIndices = QList<QString>();
-    for (uint i = arrayInfo.lBound; i < arrayInfo.lBound + arrayInfo.elements; ++i)
+    for (qint64 i = arrayInfo.lBound; i < qint64(arrayInfo.lBound) + arrayInfo.elements; ++i)
     {
       for (const auto & name : arrayIndices)
       {

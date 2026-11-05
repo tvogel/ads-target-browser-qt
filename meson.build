@@ -30,6 +30,7 @@ sources = files(
   'AdsDatatypeIndex.cpp',
   'AdsSymbolIndex.cpp',
   'AdsCodec.cpp',
+  'AdsEntryTrailer.cpp',
   'RouteCreationDialog.cpp',
   'RemoteRouteCreation.cpp',
 )
@@ -57,6 +58,8 @@ uic_files = qt6.compile_ui(sources : ui_files, preserve_paths: true)
 
 sample16 = executable('targetbrowser',
   [sources, uic_files, moc_files],
+  # must match the defines libAdsLib.so is built with (C linkage of the Ads* API, header layout)
+  cpp_args: ['-DBHF_ADS_EXPORT_C', '-DBHF_ADS_USE_TWINCAT_ORDER'],
   include_directories: inc,
   dependencies: [
     cxx.find_library('AdsLib', dirs: meson.project_source_root() + '/../build/'),

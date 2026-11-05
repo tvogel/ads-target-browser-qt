@@ -44,7 +44,7 @@
 
 struct AdsDatatypeArrayInfo
 {
-  uint32_t lBound;
+  int32_t lBound; // signed: ARRAY[-5..5] is valid
   uint32_t elements;
 };
 
@@ -92,6 +92,12 @@ struct AdsDatatypeEntry
   // ADS_INT8    comment[];          // comment of datatype with terminating \0
   // AdsDatatypeArrayInfo  array[];  // array information, if arrayDim > 0
   // AdsDatatypeEntry    subItems[]; // sub items, if subItems > 0
+  // GUID                  typeGuid;   // if ADSDATATYPEFLAG_TYPEGUID
+  // ADS_UINT8             copyMask[size]; // if ADSDATATYPEFLAG_COPYMASK
+  // ADS_UINT16 methodCount; methods[]; // if ADSDATATYPEFLAG_METHODINFOS, each starting with its uint32 entryLength
+  // ADS_UINT16 attributeCount; { ADS_UINT8 nameLength, valueLength; name\0; value\0 }[] // if ADSDATATYPEFLAG_ATTRIBUTES
+  // ADS_UINT16 enumInfoCount; { ADS_UINT8 nameLength; name\0; ADS_UINT8 value[size] }[] // if ADSDATATYPEFLAG_ENUMINFOS
+  // padding up to entryLength
   const char * name() const
   {
     return reinterpret_cast<const char *>(this + 1);
@@ -113,6 +119,10 @@ struct AdsDatatypeEntry
     return reinterpret_cast<const AdsDatatypeEntry *>(reinterpret_cast<const char *>(arrayInfo()) + arrayDim * sizeof(AdsDatatypeArrayInfo));
   }
   class QJsonObject toJson() const;
+
+private:
+  // decodes type GUID, copy mask, attributes and enum infos following the sub items
+  void appendTrailerToJson(class QJsonObject & jsonObject) const;
 };
 
 AdsDatatypeEntry * AdsDatatypeStructItem(AdsDatatypeEntry * p,

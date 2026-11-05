@@ -1,9 +1,12 @@
 #include "AdsDatatypeEntry.h"
 #include "AdsCodec.h"
 #include "AdsDef.h"
+#include "AdsEntryTrailer.h"
 
+#include <QDebug>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QtEndian>
 
 const char * adsDatatypeIdToString(AdsDatatypeId type)
 {
@@ -108,13 +111,51 @@ QString adsDatatypeFlagsToString(uint32_t flags)
   return flagStrings.join(" | ");
 }
 
+namespace
+{
+// Decodes an enum value of `size` bytes according to the base data type.
+// 64-bit values not representable exactly as double are returned as string.
+QJsonValue enumValueToJson(const char * p, uint32_t size, AdsDatatypeId type)
+{
+  constexpr qint64 maxExactDouble = qint64(1) << 53;
+  switch (size)
+  {
+    case 1:
+      return type == AdsDatatypeId::Int8 ? qint64(int8_t(*p)) : qint64(uint8_t(*p));
+    case 2:
+      return type == AdsDatatypeId::Int16 ? qint64(qFromLittleEndian<int16_t>(p))
+                                          : qint64(qFromLittleEndian<uint16_t>(p));
+    case 4:
+      return type == AdsDatatypeId::Int32 ? qint64(qFromLittleEndian<int32_t>(p))
+                                          : qint64(qFromLittleEndian<uint32_t>(p));
+    case 8:
+      if (type == AdsDatatypeId::Int64)
+      {
+        auto v = qFromLittleEndian<qint64>(p);
+        if (v > maxExactDouble || v < -maxExactDouble)
+          return QString::number(v);
+        return v;
+      }
+      else
+      {
+        auto v = qFromLittleEndian<quint64>(p);
+        if (v > quint64(maxExactDouble))
+          return QString::number(v);
+        return qint64(v);
+      }
+    default:
+      return QString::fromLatin1(QByteArray(p, int(size)).toHex());
+  }
+}
+} // namespace
+
 QJsonObject AdsDatatypeEntry::toJson() const
 {
   auto codec = Ads::codec();
 
   QJsonObject jsonObject{
-      {"hashValue", int(hashValue)},
-      {"typeHashValue", int(typeHashValue)},
+      {"hashValue", qint64(hashValue)},
+      {"typeHashValue", qint64(typeHashValue)},
       {"size", int(size)},
       {"offs", int(offs)},
       {"dataType", int(dataType)},
@@ -127,6 +168,10 @@ QJsonObject AdsDatatypeEntry::toJson() const
       {"comment", codec->toUnicode(comment(), commentLength)},
   };
 
+  // for bit-sized items, offs is given in bits instead of bytes
+  if (flags & ADSDATATYPEFLAG_BITVALUES)
+    jsonObject["offsInBits"] = true;
+
   if (arrayDim > 0)
   {
     QJsonArray arrayInfo;
@@ -134,8 +179,8 @@ QJsonObject AdsDatatypeEntry::toJson() const
     {
       const AdsDatatypeArrayInfo * info = this->arrayInfo() + i;
       QJsonObject arrayObj{
-          {"lBound", int(info->lBound)},
-          {"elements", int(info->elements)}};
+          {"lBound", qint64(info->lBound)},
+          {"elements", qint64(info->elements)}};
       arrayInfo.append(arrayObj);
     }
     jsonObject["arrayInfo"] = arrayInfo;
@@ -155,7 +200,75 @@ QJsonObject AdsDatatypeEntry::toJson() const
     jsonObject["subItems"] = subItemsArray;
   }
 
+  appendTrailerToJson(jsonObject);
+
   return jsonObject;
+}
+
+void AdsDatatypeEntry::appendTrailerToJson(QJsonObject & jsonObject) const
+{
+  // skip sub items to find the start of the trailer
+  auto begin = reinterpret_cast<const char *>(subItems());
+  for (int i = 0; i < subItemCount; ++i)
+    begin += reinterpret_cast<const AdsDatatypeEntry *>(begin)->entryLength;
+
+  auto end = reinterpret_cast<const char *>(this) + entryLength;
+  if (begin > end)
+  {
+    qWarning() << "Sub items of" << jsonObject["name"].toString() << "exceed the entry length.";
+    return;
+  }
+  Ads::TrailerReader reader(begin, end);
+
+  if (flags & ADSDATATYPEFLAG_TYPEGUID)
+  {
+    if (auto p = reader.take(16))
+      jsonObject["typeGuid"] = Ads::guidToString(p);
+  }
+
+  if (flags & ADSDATATYPEFLAG_COPYMASK)
+  {
+    if (auto p = reader.take(size))
+      jsonObject["copyMask"] = QString::fromLatin1(QByteArray(p, int(size)).toHex());
+  }
+
+  if (flags & ADSDATATYPEFLAG_METHODINFOS)
+  {
+    // method entries are not decoded; just skip over them
+    auto methodCount = reader.read<uint16_t>();
+    for (int i = 0; i < methodCount && reader.ok(); ++i)
+    {
+      auto methodLength = reader.read<uint32_t>();
+      if (methodLength < sizeof(uint32_t))
+        reader.invalidate();
+      else
+        reader.take(methodLength - sizeof(uint32_t));
+    }
+    if (reader.ok())
+      jsonObject["methodCount"] = methodCount;
+  }
+
+  if (flags & ADSDATATYPEFLAG_ATTRIBUTES && reader.ok())
+    jsonObject["attributes"] = Ads::readAttributes(reader);
+
+  if (flags & ADSDATATYPEFLAG_ENUMINFOS && reader.ok())
+  {
+    QJsonArray enumInfos;
+    auto enumInfoCount = reader.read<uint16_t>();
+    for (int i = 0; i < enumInfoCount && reader.ok(); ++i)
+    {
+      auto nameLength = reader.read<uint8_t>();
+      auto enumName = reader.readString(nameLength);
+      auto valuePtr = reader.take(size);
+      if (reader.ok())
+        enumInfos.append(QJsonObject{{"name", enumName},
+                                     {"value", enumValueToJson(valuePtr, size, AdsDatatypeId(dataType))}});
+    }
+    jsonObject["enumInfos"] = enumInfos;
+  }
+
+  if (!reader.ok())
+    qWarning() << "Truncated type information in data type entry" << jsonObject["name"].toString();
 }
 
 AdsDatatypeEntry * AdsDatatypeStructItem(AdsDatatypeEntry * p,

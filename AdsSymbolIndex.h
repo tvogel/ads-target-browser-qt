@@ -36,6 +36,7 @@ public: // methods
   ~AdsSymbolIndex();
 
   const auto & entries() const { return mEntries; }
+  const AdsSymbolEntryAccess * lookup(const QString & name) const { return mNameIndex.value(name, nullptr); }
 
 private: // methods
   void build();

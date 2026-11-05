@@ -20,12 +20,14 @@
 #include <QSettings>
 #include <QSortFilterProxyModel>
 #include <QStandardPaths>
+#include <QTimeZone>
 #include <QVariant>
 
 #include "AdsCodec.h"
 #include "AdsDatatypeEntry.h"
 #include "AdsDatatypeIndex.h"
 #include "AdsDevice.h"
+#include "AdsLib.h"
 #include "AdsSymbolIndex.h"
 #include "AdsSymbolModel.h"
 #include "AdsSymbolUploadInfo2.h"
@@ -237,6 +239,8 @@ void TargetBrowser::retrieveSymbolsAndTypes()
 
   mSymbols.clear();
   mDatatypes.clear();
+  mLoadedFromCache = false;
+  mRetrievedAt = QDateTime();
 
   QString cacheFilename =
       QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
@@ -252,6 +256,7 @@ void TargetBrowser::retrieveSymbolsAndTypes()
     auto symbolUploadInfo = AdsSymbolUploadInfo2::fromDevice(*mAdsDevice);
     mSymbols = symbolUploadInfo.uploadSymbols(*mAdsDevice);
     mDatatypes = symbolUploadInfo.uploadDatatypes(*mAdsDevice);
+    mRetrievedAt = QDateTime::currentDateTimeUtc();
   }
   catch (const std::exception & e)
   {
@@ -313,6 +318,8 @@ bool TargetBrowser::loadFromCache()
     return false;
   }
   qDebug() << "Loaded symbols and datatypes from cache:" << cacheFilename;
+  mLoadedFromCache = true;
+  mRetrievedAt = QFileInfo(cacheFilename).lastModified().toUTC();
   return true;
 }
 
@@ -374,11 +381,19 @@ static QVariant valueToVariant(const QByteArray & value, AdsDatatypeId type)
     case AdsDatatypeId::Real80:
       return QVariant::fromValue(qFromLittleEndian<long double>(value.data()));
     case AdsDatatypeId::String:
-      return QString::fromUtf8(value); // or, use Ads::codec()?
+    {
+      // STRING(n) occupies n+1 bytes; the content ends at the first \0
+      auto length = value.indexOf('\0');
+      return Ads::codec()->toUnicode(value.constData(), length < 0 ? value.size() : length);
+    }
     case AdsDatatypeId::WString:
-      return QString::fromUtf16(
-          reinterpret_cast<const char16_t *>(value.data()),
-          value.size() / sizeof(char16_t));
+    {
+      auto chars = reinterpret_cast<const char16_t *>(value.constData());
+      qsizetype length = 0;
+      while (length < value.size() / qsizetype(sizeof(char16_t)) && chars[length])
+        ++length;
+      return QString::fromUtf16(chars, length);
+    }
     case AdsDatatypeId::BigType:
       // Handle BigType as a custom type, or return as QByteArray
       return QString("Unresolved struct, hex dump: %1")
@@ -553,26 +568,187 @@ AdsSymbolModel * TargetBrowser::symbolModel() const
           ->sourceModel());
 }
 
+static const char * adsStateToString(ADSSTATE state)
+{
+  static const char * names[] = {
+      "INVALID", "IDLE", "RESET", "INIT", "START", "RUN", "STOP", "SAVECFG", "LOADCFG", "POWERFAILURE",
+      "POWERGOOD", "ERROR", "SHUTDOWN", "SUSPEND", "RESUME", "CONFIG", "RECONFIG", "STOPPING",
+      "INCOMPATIBLE", "EXCEPTION"};
+  static_assert(std::size(names) == ADSSTATE_MAXSTATES);
+  return state < ADSSTATE_MAXSTATES ? names[state] : "UNKNOWN";
+}
+
+// Reads TwinCAT_SystemInfoVarList._AppInfo (project name, application timestamp,
+// online change count, ...) and decodes its scalar members generically via the type index.
+QJsonObject TargetBrowser::readAppInfo() const
+{
+  static const auto appInfoSymbolName = QStringLiteral("TwinCAT_SystemInfoVarList._AppInfo");
+
+  auto model = symbolModel();
+  auto symbol = model->symbolIndex().lookup(appInfoSymbolName);
+  if (!symbol)
+    return {{"error", "Symbol " + appInfoSymbolName + " not found"}};
+  auto typeName = Ads::codec()->toUnicode(symbol->type(), symbol->typeLength);
+  auto type = model->typeIndex().lookup(typeName);
+  if (!type)
+    return {{"error", "Type " + typeName + " not found"}};
+
+  QByteArray value(symbol->size, Qt::Uninitialized);
+  uint32_t bytesRead = 0;
+  auto error = mAdsDevice->ReadReqEx2(symbol->iGroup, symbol->iOffs, value.size(), value.data(), &bytesRead);
+  if (error != ADSERR_NOERR)
+    return {{"error", AdsException(error).what()}};
+  value.truncate(bytesRead);
+
+  QJsonObject appInfo{{"symbol", appInfoSymbolName}, {"type", typeName}};
+  for (auto member : type->children(model->typeIndex()))
+  {
+    auto memberType = member->adsType();
+    auto dataType = AdsDatatypeId(memberType->dataType);
+    if (dataType == AdsDatatypeId::BigType || dataType == AdsDatatypeId::Void || memberType->arrayDim > 0 ||
+        memberType->flags & ADSDATATYPEFLAG_BITVALUES || member->offset() + memberType->size > uint32_t(value.size()))
+      continue;
+
+    auto memberValue = valueToVariant(value.mid(member->offset(), memberType->size), dataType);
+    appInfo[member->name()] = QJsonValue::fromVariant(memberValue);
+
+    auto memberTypeName = Ads::codec()->toUnicode(memberType->type(), memberType->typeLength);
+    if (memberTypeName == "DT" || memberTypeName == "DATE_AND_TIME")
+    {
+      // seconds since 1970-01-01, PLC local time
+      appInfo[member->name() + "Iso"] =
+          QDateTime::fromSecsSinceEpoch(memberValue.toLongLong(), QTimeZone::UTC).toString("yyyy-MM-ddTHH:mm:ss");
+    }
+    else if (auto memberTypeEntry = model->typeIndex().lookup(memberTypeName))
+    {
+      // resolve enum values to their names
+      for (const auto & enumInfo : memberTypeEntry->adsType()->toJson()["enumInfos"].toArray())
+      {
+        auto enumObject = enumInfo.toObject();
+        if (enumObject["value"].toInteger() == memberValue.toLongLong())
+          appInfo[member->name() + "Name"] = enumObject["name"];
+      }
+    }
+  }
+  return appInfo;
+}
+
+QJsonObject TargetBrowser::exportInfo() const
+{
+  auto model = symbolModel();
+  QJsonObject info{
+      {"formatVersion", 1},
+      {"exportedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
+      {"exporter", QJsonObject{{"name", QApplication::applicationName()},
+                               {"version", QApplication::applicationVersion()}}},
+      {"encoding", QString::fromLatin1(Ads::codec()->name())},
+      {"target", QJsonObject{{"netId", mNetId}, {"ip", mIp}, {"port", mPort}}},
+      {"data", QJsonObject{{"source", mLoadedFromCache ? "cache" : "device"},
+                           {"retrievedAt", mRetrievedAt.toString(Qt::ISODate)},
+                           {"symbolCount", model->symbolIndex().entries().size()},
+                           {"symbolBytes", mSymbols.size()},
+                           {"dataTypeCount", model->typeIndex().entries().size()},
+                           {"dataTypeBytes", mDatatypes.size()}}},
+  };
+
+  // live information from the target; failures are recorded instead of aborting the export
+  auto query = [&](const char * key, auto && function)
+  {
+    if (!mAdsDevice)
+    {
+      info[key] = QJsonObject{{"error", "Not connected"}};
+      return;
+    }
+    try
+    {
+      info[key] = function();
+    }
+    catch (const std::exception & e)
+    {
+      info[key] = QJsonObject{{"error", e.what()}};
+    }
+  };
+
+  query("device", [&]
+        {
+          auto deviceInfo = mAdsDevice->GetDeviceInfo();
+          return QJsonObject{
+              {"name", QString::fromLatin1(deviceInfo.name, qstrnlen(deviceInfo.name, sizeof(deviceInfo.name)))},
+              {"version", QString("%1.%2.%3")
+                              .arg(deviceInfo.version.version)
+                              .arg(deviceInfo.version.revision)
+                              .arg(deviceInfo.version.build)}}; });
+  query("system", [&]
+        {
+          // TwinCAT system service: the device info of the PLC port only tells the PLC runtime
+          // version, the TwinCAT build is reported here. Reuse the local port and route of the
+          // existing connection; a second AdsDevice would delete the shared route when destroyed.
+          constexpr uint16_t systemServicePort = 10000;
+          const AmsAddr systemAddr{AmsNetId(mNetId.toStdString()), systemServicePort};
+          char name[DEVICE_NAME_LENGTH] = {};
+          AdsVersion version{};
+          auto error = AdsSyncReadDeviceInfoReqEx(mAdsDevice->GetLocalPort(), &systemAddr, name, &version);
+          if (error)
+            throw AdsException(error);
+          uint16_t adsState = 0, deviceState = 0;
+          error = AdsSyncReadStateReqEx(mAdsDevice->GetLocalPort(), &systemAddr, &adsState, &deviceState);
+          if (error)
+            throw AdsException(error);
+          return QJsonObject{
+              {"port", systemServicePort},
+              {"name", QString::fromLatin1(name, qstrnlen(name, sizeof(name)))},
+              {"version", QString("%1.%2.%3").arg(version.version).arg(version.revision).arg(version.build)},
+              {"state", QJsonObject{{"ads", int(adsState)},
+                                    {"adsName", adsStateToString(ADSSTATE(adsState))},
+                                    {"device", int(deviceState)}}}}; });
+  query("state", [&]
+        {
+          auto state = mAdsDevice->GetState();
+          return QJsonObject{{"ads", int(state.ads)},
+                             {"adsName", adsStateToString(state.ads)},
+                             {"device", int(state.device)}}; });
+  query("uploadInfo", [&]
+        {
+          auto uploadInfo = AdsSymbolUploadInfo2::fromDevice(*mAdsDevice);
+          return QJsonObject{{"nSymbols", qint64(uploadInfo.nSymbols)},
+                             {"nSymSize", qint64(uploadInfo.nSymSize)},
+                             {"nDatatypes", qint64(uploadInfo.nDatatypes)},
+                             {"nDatatypeSize", qint64(uploadInfo.nDatatypeSize)},
+                             {"nMaxDynSymbols", qint64(uploadInfo.nMaxDynSymbols)},
+                             {"nUsedDynSymbols", qint64(uploadInfo.nUsedDynSymbols)}}; });
+  query("appInfo", [&]
+        { return readAppInfo(); });
+
+  return info;
+}
+
+void TargetBrowser::writeExport(const QString & title, const QString & key, const QJsonArray & entries)
+{
+  QString fileName = QFileDialog::getSaveFileName(this, title, QString(), tr("JSON Files (*.json)"));
+  if (fileName.isEmpty())
+    return;
+
+  QJsonObject root{{"info", exportInfo()}, {key, entries}};
+
+  QFile file(fileName);
+  if (!file.open(QIODevice::WriteOnly) || file.write(QJsonDocument(root).toJson()) < 0)
+  {
+    QMessageBox::critical(this, title, tr("Failed to write %1: %2").arg(fileName, file.errorString()));
+    return;
+  }
+  mUi->statusbar->showMessage(tr("Exported %1 entries to %2").arg(entries.size()).arg(fileName));
+}
+
 void TargetBrowser::exportSymbols()
 {
   auto model = symbolModel();
   if (!model)
     return;
 
-  QString fileName = QFileDialog::getSaveFileName(this, tr("Export Symbols"), QString(), tr("JSON Files (*.json)"));
-  if (fileName.isEmpty())
-    return;
-
   QJsonArray arr;
-  const auto & symbols = model->symbolIndex().entries();
-  for (const auto & entry : symbols)
-  {
+  for (const auto & entry : model->symbolIndex().entries())
     arr.append(entry->toJson());
-  }
-  QJsonDocument doc(arr);
-  QFile file(fileName);
-  if (file.open(QIODevice::WriteOnly))
-    file.write(doc.toJson());
+  writeExport(tr("Export Symbols"), "symbols", arr);
 }
 
 void TargetBrowser::exportDataTypes()
@@ -581,20 +757,10 @@ void TargetBrowser::exportDataTypes()
   if (!model)
     return;
 
-  QString fileName = QFileDialog::getSaveFileName(this, tr("Export Data Types"), QString(), tr("JSON Files (*.json)"));
-  if (fileName.isEmpty())
-    return;
-
   QJsonArray arr;
-  const auto & types = model->typeIndex().entries();
-  for (const auto & entry : types)
-  {
+  for (const auto & entry : model->typeIndex().entries())
     arr.append(entry->adsType()->toJson());
-  }
-  QJsonDocument doc(arr);
-  QFile file(fileName);
-  if (file.open(QIODevice::WriteOnly))
-    file.write(doc.toJson());
+  writeExport(tr("Export Data Types"), "dataTypes", arr);
 }
 
 int main(int argc, char * argv[])

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDateTime>
 #include <QMainWindow>
 
 #include "AdsSymbolUploadInfo2.h"
@@ -47,6 +48,11 @@ private: // methods
 
   AdsSymbolModel * symbolModel() const;
 
+  // metadata describing target, data source and PLC application for exports
+  class QJsonObject exportInfo() const;
+  class QJsonObject readAppInfo() const;
+  void writeExport(const QString & title, const QString & key, const class QJsonArray & entries);
+
 private: // attributes
   Ui::TargetBrowser * mUi = nullptr;
   QString mNetId;
@@ -56,4 +62,6 @@ private: // attributes
   std::unique_ptr<class AdsDevice> mAdsDevice;
   QByteArray mSymbols;
   QByteArray mDatatypes;
+  bool mLoadedFromCache = false;
+  QDateTime mRetrievedAt;
 };
